@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition Attendance System</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.11.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 p-4">
+    <div class="max-w-md mx-auto bg-white rounded-lg shadow-lg p-6">
+        <h1 class="text-2xl font-bold text-center mb-6 text-gray-800">Face Recognition Attendance</h1>
+        
+        <div class="mb-6">
+            <div id="registerSection" class="space-y-4">
+                <h2 class="text-lg font-semibold text-gray-700">Register New Employee</h2>
+                <input type="text" id="employeeName" placeholder="Employee Name" class="w-full p-2 border rounded">
+                <input type="text" id="employeeId" placeholder="Employee ID" class="w-full p-2 border rounded">
+                <div class="relative">
+                    <video id="registerVideo" class="w-full h-64 bg-black rounded" autoplay muted></video>
+                    <canvas id="registerCanvas" class="absolute top-0 left-0 w-full h-64"></canvas>
+                </div>
+                <button id="captureBtn" class="w-full bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600">
+                    Capture Face
+                </button>
+            </div>
+        </div>
+
+        <div class="mb-6">
+            <div id="attendanceSection" class="space-y-4">
+                <h2 class="text-lg font-semibold text-gray-700">Mark Attendance</h2>
+                <div class="relative">
+                    <video id="attendanceVideo" class="w-full h-64 bg-black rounded" autoplay muted></video>
+                    <canvas id="attendanceCanvas" class="absolute top-0 left-0 w-full h-64"></canvas>
+                </div>
+                <div id="status" class="text-center text-lg font-semibold"></div>
+            </div>
+        </div>
+
+        <div id="loadingIndicator" class="hidden">
+            <div class="flex justify-center items-center">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let registeredFaces = [];
+        let detector;
+        let faceapi;
+        const appSlug = 'face-attendance-123456';
+
+        async function initFaceDetection() {
+            await faceapi.nets.ssdMobilenetv1.loadFromUri('https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights');
+            await faceapi.nets.faceLandmark68Net.loadFromUri('https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights');
+            await faceapi.nets.faceRecognitionNet.loadFromUri('https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights');
+            detector = await blazeface.load();
+            
+            // Start both video streams
+            const registerVideo = document.getElementById('registerVideo');
+            const attendanceVideo = document.getElementById('attendanceVideo');
+            
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            registerVideo.srcObject = stream;
+            const stream2 = await navigator.mediaDevices.getUserMedia({ video: true });
+            attendanceVideo.srcObject = stream2;
+
+            // Start attendance detection
+            detectAttendance();
+        }
+
+        async function captureEmployee() {
+            const registerVideo = document.getElementById('registerVideo');
+            const registerCanvas = document.getElementById('registerCanvas');
+            const employeeName = document.getElementById('employeeName').value;
+            const employeeId = document.getElementById('employeeId').value;
+
+            if (!employeeName || !employeeId) {
+                alert('Please enter employee name and ID');
+                return;
+            }
+
+            const detection = await detector.estimateFaces(registerVideo);
+            if (detection.length === 0) {
+                alert('No face detected. Please position yourself properly.');
+                return;
+            }
+
+            // Capture face descriptor
+            const displaySize = { width: registerVideo.width, height: registerVideo.height };
+            const canvas = faceapi.createCanvasFromMedia(registerVideo);
+            const detection2 = await faceapi.detectSingleFace(registerVideo)
+                .withFaceLandmarks()
+                .withFaceDescriptor();
+
+            if (detection2) {
+                // Store face data
+                const faceData = {
+                    id: employeeId,
+                    name: employeeName,
+                    descriptor: Array.from(detection2.descriptor)
+                };
+
+                // Save to MongoDB
+                const response = await fetch('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/mongodb', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer NIIYt4894jSOqE7sUM8hBG2oofH2',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        appSlug: appSlug,
+                        action: 'create',
+                        collection: 'employees',
+                        data: faceData
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Employee registered successfully!');
+                    registeredFaces.push(faceData);
+                    document.getElementById('employeeName').value = '';
+                    document.getElementById('employeeId').value = '';
+                }
+            }
+        }
+
+        async function detectAttendance() {
+            const attendanceVideo = document.getElementById('attendanceVideo');
+            const attendanceCanvas = document.getElementById('attendanceCanvas');
+            const statusDiv = document.getElementById('status');
+
+            while (true) {
+                const detection = await faceapi.detectSingleFace(attendanceVideo)
+                    .withFaceLandmarks()
+                    .withFaceDescriptor();
+
+                if (detection) {
+                    const match = await findMatch(detection.descriptor);
+                    if (match) {
+                        // Mark attendance
+                        const timestamp = new Date();
+                        const attendanceData = {
+                            employeeId: match.id,
+                            employeeName: match.name,
+                            timestamp: timestamp,
+                            type: 'auto'
+                        };
+
+                        const response = await fetch('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/mongodb', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': 'Bearer NIIYt4894jSOqE7sUM8hBG2oofH2',
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                appSlug: appSlug,
+                                action: 'create',
+                                collection: 'attendance',
+                                data: attendanceData
+                            })
+                        });
+
+                        if (response.ok) {
+                            statusDiv.textContent = `Attendance marked for ${match.name}`;
+                            statusDiv.className = 'text-center text-lg font-semibold text-green-600';
+                            // Wait for 5 seconds before detecting the next person
+                            await new Promise(resolve => setTimeout(resolve, 5000));
+                            statusDiv.textContent = 'Waiting for face...';
+                            statusDiv.className = 'text-center text-lg font-semibold text-gray-600';
+                        }
+                    } else {
+                        statusDiv.textContent = 'Unknown person';
+                        statusDiv.className = 'text-center text-lg font-semibold text-red-600';
+                    }
+                } else {
+                    statusDiv.textContent = 'Waiting for face...';
+                    statusDiv.className = 'text-center text-lg font-semibold text-gray-600';
+                }
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+
+        async function findMatch(descriptor) {
+            // Load registered faces from MongoDB if not loaded
+            if (registeredFaces.length === 0) {
+                const response = await fetch('https://r0c8kgwocscg8gsokogwwsw4.zetaverse.one/mongodb', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer NIIYt4894jSOqE7sUM8hBG2oofH2',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        appSlug: appSlug,
+                        action: 'read',
+                        collection: 'employees'
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    registeredFaces = data.result;
+                }
+            }
+
+            // Find matching face
+            const threshold = 0.6;
+            let match = null;
+            let minDistance = Infinity;
+
+            for (const face of registeredFaces) {
+                const distance = faceapi.euclideanDistance(descriptor, new Float32Array(face.descriptor));
+                if (distance < threshold && distance < minDistance) {
+                    minDistance = distance;
+                    match = face;
+                }
+            }
+
+            return match;
+        }
+
+        document.getElementById('captureBtn').addEventListener('click', captureEmployee);
+
+        // Initialize the system
+        window.addEventListener('load', initFaceDetection);
+    </script>
+<script>document.body.addEventListener('wheel', e => { if (!e.ctrlKey) return; e.preventDefault(); return }, { passive: false })</script>
+	</body>
+</html>
